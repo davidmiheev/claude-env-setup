@@ -4,7 +4,7 @@
 #
 #   base       system libs: compilers, swig (Box2D), GL/EGL/OSMesa + ffmpeg (MuJoCo, video), node
 #   python     uv + Python 3.12 (see below)
-#   repos      clones ai-safety-ladder, rl-ladder, ml-ladder, jax-experiments into $RESEARCH_DIR
+#   repos      clones ai-safety-ladder, ml-ladder, jax-experiments into $RESEARCH_DIR
 #   ds-agent   github.com/davidmiheev/ds-agent: uv sync + the ds-env venv with the quant preset
 #   mcp        registers ds-agent's MCP servers with Claude Code (user scope) and checks that each
 #              answers tools/list: research, ds, ds-memory, kaggle, colab
@@ -16,12 +16,12 @@
 #              hftbacktest, numba, polars, statsmodels, arch, cvxpy, optuna   (ml-ladder, jax-experiments)
 #   rl         venv "rl": gymnasium (classic-control, Box2D, MuJoCo, Atari), SB3 + contrib,
 #              PettingZoo, TRL/PEFT, JAX RL (gymnax, brax, pgx, rlax, flashbax), hftbacktest for
-#              the market-making part                                              (rl-ladder)
+#              the market-making part
 #   equivariant  (opt-in, WITH_ESCNN=1) venv "equivariant": torch + escnn, which needs numpy<1.27
 #   verify     imports + tiny functional runs in every venv
 #
 # Why Python 3.12: ai-safety-ladder needs <3.13, jax-experiments needs >=3.12 (jax 0.11), and
-# rl-ladder / ml-ladder need >=3.11. 3.12 is the only version that satisfies all four.
+# ml-ladder needs >=3.11. 3.12 is the only version that satisfies all three.
 # Why separate venvs: the stacks pin against each other (TransformerLens vs. current
 # transformers, xgboost vs. xgboost-cpu, ...) and each repo's own `uv sync` still works.
 # All torch wheels are CPU builds unless a GPU is found (a CPU torch saves ~3 GB of CUDA wheels).
@@ -40,8 +40,8 @@
 #   WITH_ESCNN=1                 also build the "equivariant" venv (torch + escnn)
 #   DS_PRESET=quant              passed to ds-agent's install_ds_env.sh (default here: quant)
 #   MCP_SERVERS="research ds"    register only these ds-agent servers (default: all five)
-#   GITHUB_TOKEN / GH_TOKEN      lets `repos` clone the private rl-ladder when it is not attached
-#                                to the session (used as a request header, never stored)
+#   GITHUB_TOKEN / GH_TOKEN      lets `repos` clone a private repo (add it to REPOS) when it is not
+#                                attached to the session (used as a request header, never stored)
 #   KAGGLE_API_TOKEN / COLAB_TOKEN_JSON   credentials for the kaggle / colab servers. Set them as
 #                                environment variables of the cloud environment: they reach the
 #                                session (the servers read them at launch), not this script, and
@@ -59,7 +59,7 @@ DS_AGENT_REPO="${DS_AGENT_REPO:-https://github.com/davidmiheev/ds-agent.git}"
 DS_AGENT_DIR="${DS_AGENT_DIR:-$HOME/ds-agent}"
 export DS_PRESET="${DS_PRESET:-quant}"
 GH_OWNER="${GH_OWNER:-davidmiheev}"
-REPOS="${REPOS:-ai-safety-ladder rl-ladder ml-ladder jax-experiments}"
+REPOS="${REPOS:-ai-safety-ladder ml-ladder jax-experiments}"
 
 export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-system}"
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
@@ -661,7 +661,6 @@ stage_equivariant() {
 }
 stage_rl() {
   build_venv rl "${RL_EXTRA:-}" "${RL_PKGS[@]}"
-  vrepo rl rl-ladder
   # headless MuJoCo rendering on a box without a GPU
   if [ "$GPU" = 0 ]; then persist_env 'export MUJOCO_GL=osmesa'; fi
 }
