@@ -707,27 +707,53 @@ print("jax RL libs, TRL, hftbacktest ok")
 }
 
 # ------------------------------------------------------------------- driver ----
+# >>> parallel-stages (shared by setup-dev-common.sh and setup-research.sh) -----------
+# spawn NAME runs stage_<name> in a background subshell (output to $LOGDIR/NAME.log);
+# join NAME... waits, prints each stage's log with its duration, and records it in TIMES.
+T0="${T0:-$SECONDS}"
 FAILED=()
 TIMES=()
-T0=$SECONDS
-run_stage() { # run_stage NAME  -> runs stage_<name> in a subshell with `set -e` really on
-  local name="$1" rc
-  if skip "$name"; then log "skipping $name"; return 0; fi
-  log "stage: $name"
-  local t=$SECONDS
-  set +e
-  ( set -euo pipefail; "stage_${name//-/_}" )
-  rc=$?
-  set -e
-  TIMES+=("$(printf '%-12s %4ss%s' "$name" "$((SECONDS - t))" "$([ "$rc" -ne 0 ] && echo '  FAILED')")")
-  if [ "$rc" -ne 0 ]; then warn "stage '$name' failed (exit $rc)"; FAILED+=("$name"); fi
+LOGDIR="$(mktemp -d)"
+declare -A PID STARTED
+spawn() {
+  local name="$1"
+  if skip "$name"; then echo "[+$((SECONDS - T0))s] skipping $name"; return 0; fi
+  echo "[+$((SECONDS - T0))s] start $name"
+  STARTED[$name]=$SECONDS
+  ( set +e; s0=$SECONDS; ( set -euo pipefail; "stage_${name//-/_}" ) >"$LOGDIR/$name.log" 2>&1; echo $? >"$LOGDIR/$name.rc"; echo $((SECONDS - s0)) >"$LOGDIR/$name.secs" ) &
+  PID[$name]=$!
 }
+join() {
+  local name rc secs
+  for name in "$@"; do
+    [ -n "${PID[$name]:-}" ] || continue
+    wait "${PID[$name]}" || true
+    rc="$(cat "$LOGDIR/$name.rc" 2>/dev/null || echo 1)"
+    secs="$(cat "$LOGDIR/$name.secs" 2>/dev/null || echo $((SECONDS - STARTED[$name])))"
+    log "stage: $name (${secs}s, $([ "$rc" = 0 ] && echo ok || echo "FAILED, exit $rc"))"
+    cat "$LOGDIR/$name.log"
+    TIMES+=("$(printf '%-12s %4ss  (started +%ss)%s' "$name" "$secs" "$((STARTED[$name] - T0))" "$([ "$rc" -ne 0 ] && echo '  FAILED')")")
+    if [ "$rc" -ne 0 ]; then warn "stage '$name' failed (exit $rc)"; FAILED+=("$name"); fi
+    unset "PID[$name]"
+  done
+}
+print_times() { echo; echo "stage times (wall $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"; }
+# <<< parallel-stages
 
-run_stage base
-for s in python repos ds-agent mcp safety typst ml rl equivariant verify; do run_stage "$s"; done
+# lanes: [ds-agent -> mcp]  |  [base + python + repos -> safety, ml, rl, equivariant -> typst]  -> verify
+ensure_uv || warn "uv could not be installed; uv-based stages will fail"   # once, before the lanes race for it
+spawn base; spawn python; spawn repos; spawn ds-agent
+join base python repos          # the venv builds need the system libs, uv's Python and the repos
+spawn safety; spawn ml; spawn rl; spawn equivariant
+join ds-agent
+spawn mcp
+join safety
+spawn typst                      # runs over the safety venv's typst package
+join ml rl equivariant typst mcp
+spawn verify
+join verify
+print_times
 
-echo
-echo "stage times (total $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"
 if [ "${#FAILED[@]}" -gt 0 ]; then
   echo "research setup finished with failures: ${FAILED[*]}" >&2
   exit 1

@@ -13,6 +13,20 @@ starts, so the MCP servers it registers are present from the first message.
 Every script has a header listing its knobs (`SKIP="stage ..."`, `MCP_SERVERS`, ...), prints a
 per-stage timing table at the end, and exits non-zero if a stage failed.
 
+## Measured times
+
+Cold run (empty home directory, apt packages already present, 2 cores). Each script prints its own
+per-stage table at the end.
+
+| script | wall time |
+|---|---|
+| `setup-math.sh` | 58 s |
+| `setup-research.sh` | 195 s (independent stages run in parallel) |
+| `setup-dev-common.sh` | 205 s (prebuilt cargo tools take ~26 s) |
+
+Times depend on the network: with a throttled connection one large wheel download stretched
+dev-common to over 20 minutes in two earlier runs.
+
 ## Notes
 
 - A setup script is snapshotted only if it finishes in about five minutes, otherwise it reruns
