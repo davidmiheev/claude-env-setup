@@ -10,7 +10,7 @@
 #   ds-agent   github.com/davidmiheev/ds-agent: uv sync + the ds-env data-science venv
 #   mcp        registers ds-agent's MCP servers with Claude Code (user scope) and checks each one
 #              answers tools/list: research, ds, ds-memory, kaggle, colab
-#   pytools    uv tools: ruff, mypy, pre-commit, ipython, pip-audit, maturin (+ py-spy/scalene/memray
+#   pytools    uv tools: ruff, mypy, pre-commit, pip-audit, maturin (+ py-spy/scalene/memray
 #              from the profilers stage)
 #   tex        pandoc + XeLaTeX + latexmk + the fonts atcoder_lectures needs
 #              (DejaVu Serif/Sans/Mono, TeX Gyre Termes Math)
@@ -50,7 +50,7 @@ RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-stable}"
 CARGO_TOOLS="${CARGO_TOOLS:-cargo-nextest cargo-llvm-cov flamegraph samply cargo-show-asm cargo-audit cargo-deny cargo-machete bacon cargo-edit cargo-expand just hyperfine}"
 SETUP_BUDGET="${SETUP_BUDGET:-270}"
 T0=$SECONDS
-PY_TOOLS="${PY_TOOLS:-ruff mypy pre-commit ipython pip-audit maturin}"
+PY_TOOLS="${PY_TOOLS:-ruff mypy pre-commit pip-audit maturin}"
 DS_AGENT_REPO="${DS_AGENT_REPO:-https://github.com/davidmiheev/ds-agent.git}"
 DS_AGENT_DIR="${DS_AGENT_DIR:-$HOME/ds-agent}"
 SKIP="${SKIP:-}"
@@ -632,8 +632,8 @@ stage_mcp() {
   mcp_summary
 }
 
-# uv tool installs spend their time on per-request latency through the proxy (ipython and
-# pip-audit pull dozens of small packages), not on bandwidth, so they run 4 at a time:
+# uv tool installs spend their time on per-request latency through the proxy (pip-audit pulls
+# dozens of small packages), not on bandwidth, so they run 4 at a time:
 # 53-79 s for the lot instead of 125-180 s one after another.
 stage_pytools() {
   ensure_uv
