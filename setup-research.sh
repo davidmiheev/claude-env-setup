@@ -4,7 +4,6 @@
 #
 #   base       system libs: compilers, swig (Box2D), GL/EGL/OSMesa + ffmpeg (MuJoCo, video), node
 #   python     uv + Python 3.12 (see below)
-#   repos      clones ai-safety-ladder, ml-ladder, jax-experiments into $RESEARCH_DIR
 #   ds-agent   github.com/davidmiheev/ds-agent: uv sync + the ds-env venv with the quant preset
 #   mcp        registers ds-agent's MCP servers with Claude Code (user scope) and checks that each
 #              answers tools/list: research, ds, ds-memory, kaggle, colab
@@ -33,15 +32,12 @@
 #   SKIP="colab verify"          stages to skip (space or comma separated). Venvs are the stages
 #                                safety / ml / rl, e.g. SKIP="safety" for an RL-only box.
 #   PY_VERSION=3.12              Python for the venvs
-#   RESEARCH_DIR=$HOME/research  where the repos are cloned
 #   VENV_DIR=$HOME/.venvs/research   venvs go to $VENV_DIR/{safety,ml,rl}
 #   ACCEL=auto|cpu|cuda          auto = CUDA builds only if nvidia-smi sees a GPU
 #   SAFETY_EXTRA= ML_EXTRA= RL_EXTRA=   extra pip requirements (space separated) per venv
 #   WITH_ESCNN=1                 also build the "equivariant" venv (torch + escnn)
 #   DS_PRESET=quant              passed to ds-agent's install_ds_env.sh (default here: quant)
 #   MCP_SERVERS="research ds"    register only these ds-agent servers (default: all five)
-#   GITHUB_TOKEN / GH_TOKEN      lets `repos` clone a private repo (add it to REPOS) when it is not
-#                                attached to the session (used as a request header, never stored)
 #   KAGGLE_API_TOKEN / COLAB_TOKEN_JSON   credentials for the kaggle / colab servers. Set them as
 #                                environment variables of the cloud environment: they reach the
 #                                session (the servers read them at launch), not this script, and
@@ -51,15 +47,12 @@ set -euo pipefail
 
 ENV_NAME=research
 PY_VERSION="${PY_VERSION:-3.12}"
-RESEARCH_DIR="${RESEARCH_DIR:-$HOME/research}"
 VENV_DIR="${VENV_DIR:-$HOME/.venvs/research}"   # not ~/.venvs/ml: that is dev-common's torch+jax venv
 ACCEL="${ACCEL:-auto}"
 SKIP="${SKIP:-}"
 DS_AGENT_REPO="${DS_AGENT_REPO:-https://github.com/davidmiheev/ds-agent.git}"
 DS_AGENT_DIR="${DS_AGENT_DIR:-$HOME/ds-agent}"
 export DS_PRESET="${DS_PRESET:-quant}"
-GH_OWNER="${GH_OWNER:-davidmiheev}"
-REPOS="${REPOS:-ai-safety-ladder ml-ladder jax-experiments}"
 
 export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-system}"
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
@@ -565,38 +558,6 @@ stage_python() {
   echo "python $PY_VERSION -> $(uv python find "$PY_VERSION")"
 }
 
-# clone_repo NAME  (public repos clone anonymously; private ones need the repo attached to the
-# session or GITHUB_TOKEN/GH_TOKEN)
-clone_repo() {
-  local name="$1" dir="$RESEARCH_DIR/$1" url="https://github.com/$GH_OWNER/$1.git" tok
-  tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-  if [ -d "$dir/.git" ]; then
-    git -C "$dir" pull --ff-only --quiet || warn "could not fast-forward $dir; using it as is"
-    return 0
-  fi
-  mkdir -p "$RESEARCH_DIR"
-  # Anonymous first: public repos need nothing, and a session's git proxy serves the repos
-  # attached to it. Only then try the token (a header, so it never lands in .git/config).
-  GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 git clone --quiet "$url" "$dir" 2>/dev/null && return 0
-  rm -rf "$dir"
-  [ -n "$tok" ] || return 1
-  GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 \
-    git -c "http.extraheader=Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)" \
-    clone --quiet "$url" "$dir"
-}
-
-stage_repos() {
-  local r
-  for r in $REPOS; do
-    if clone_repo "$r" 2>/dev/null; then
-      echo "$r -> $RESEARCH_DIR/$r ($(git -C "$RESEARCH_DIR/$r" rev-parse --abbrev-ref HEAD))"
-    else
-      warn "could not clone $GH_OWNER/$r (private? attach it to the session or set a working GITHUB_TOKEN); the venvs do not depend on it"
-    fi
-  done
-  persist_env "export RESEARCH_DIR=\"$RESEARCH_DIR\""
-}
-
 # mkvenv NAME / vinstall NAME PKG... / vpy NAME
 vpy() { printf '%s/%s/bin/python' "$VENV_DIR" "$1"; }
 mkvenv() {
@@ -611,14 +572,6 @@ vinstall() {
   # the CUDA build and pulls several GB of nvidia-* wheels.
   # No fallback to PyPI defaults on failure: that would silently fetch the CUDA torch build.
   uv pip install --python "$(vpy "$name")" --torch-backend "$BACKEND" "$@"
-}
-# Make the repo importable (src layout) without touching its pins; a failure is not fatal.
-vrepo() { # vrepo VENV REPO
-  local d="$RESEARCH_DIR/$2"
-  [ -f "$d/pyproject.toml" ] || return 0
-  uv pip install --python "$(vpy "$1")" --no-deps -e "$d" >/dev/null 2>&1 \
-    && echo "  $2 installed editable into $1" \
-    || warn "could not install $2 editable into $1 (its code still runs from $d)"
 }
 vkernel() { # register a Jupyter kernel for the venv
   "$(vpy "$1")" -m ipykernel install --user --name "research-$1" --display-name "research ($1)" >/dev/null 2>&1 \
@@ -639,7 +592,6 @@ build_venv() { # build_venv NAME "extra pkgs" pkgs...
 
 stage_safety() {
   build_venv safety "${SAFETY_EXTRA:-}" "${SAFETY_PKGS[@]}"
-  vrepo safety ai-safety-ladder
 }
 stage_typst() {
   [ -x "$(vpy safety)" ] || { warn "the safety venv is missing (stage safety)"; return 1; }
@@ -647,7 +599,6 @@ stage_typst() {
 }
 stage_ml() {
   build_venv ml "${ML_EXTRA:-}" "${ML_PKGS[@]}"
-  vrepo ml ml-ladder
 }
 
 # escnn (ml-ladder's 'equivariant' extra) pins numpy<1.27 and builds lie-learn/py3nj from source,
@@ -739,10 +690,10 @@ join() {
 print_times() { echo; echo "stage times (wall $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"; }
 # <<< parallel-stages
 
-# lanes: [ds-agent -> mcp]  |  [base + python + repos -> safety, ml, rl, equivariant -> typst]  -> verify
+# lanes: [ds-agent -> mcp]  |  [base + python -> safety, ml, rl, equivariant -> typst]  -> verify
 ensure_uv || warn "uv could not be installed; uv-based stages will fail"   # once, before the lanes race for it
-spawn base; spawn python; spawn repos; spawn ds-agent
-join base python repos          # the venv builds need the system libs, uv's Python and the repos
+spawn base; spawn python; spawn ds-agent
+join base python                # the venv builds need the system libs and uv's Python
 spawn safety; spawn ml; spawn rl; spawn equivariant
 join ds-agent
 spawn mcp
@@ -760,6 +711,5 @@ fi
 cat <<EOF
 research setup complete.
   venvs:  $VENV_DIR/{safety,ml,rl}$([ -x "$(vpy equivariant)" ] && echo ,equivariant)   (source $VENV_DIR/rl/bin/activate; Jupyter kernels research-*)
-  repos:  $RESEARCH_DIR
   MCP:    $(cd "$MCP_HOME/servers" 2>/dev/null && ls -1 *.json 2>/dev/null | sed 's/\.json$//' | tr '\n' ' ')(restart Claude Code to load them)
 EOF

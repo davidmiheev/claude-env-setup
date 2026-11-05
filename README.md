@@ -8,7 +8,7 @@ starts, so the MCP servers it registers are present from the first message.
 |---|---|---|
 | `setup-dev-common.sh` | dev-common | apt base + profilers + TeX, Rust toolchain, prebuilt cargo tools (conda-forge), Python tools (uv), ds-agent + its MCP servers |
 | `setup-math.sh` | math | CAS tools, Lean, Regina, mtengine (+ its MCP server), TeX, Typst writeup tooling |
-| `setup-research.sh` | research | uv + venvs for AI safety / ML / RL / quant, ds-agent MCP servers, the ladder repos, Typst writeup tooling |
+| `setup-research.sh` | research | uv + venvs for AI safety / ML / RL / quant, ds-agent MCP servers, Typst writeup tooling |
 
 Every script has a header listing its knobs (`SKIP="stage ..."`, `MCP_SERVERS`, ...), prints a
 per-stage timing table at the end, and exits non-zero if a stage failed.
