@@ -22,10 +22,10 @@ per-stage table at the end.
 |---|---|
 | `setup-math.sh` | 58 s |
 | `setup-research.sh` | 195 s (independent stages run in parallel) |
-| `setup-dev-common.sh` | 205 s (prebuilt cargo tools take ~26 s) |
+| `setup-dev-common.sh` | 111 s (prebuilt cargo tools ~26 s; Python tools installed 4 at a time) |
 
-Times depend on the network: with a throttled connection one large wheel download stretched
-dev-common to over 20 minutes in two earlier runs.
+Times depend on the network, which varied a lot between runs: dev-common took 99-205 s in
+four cold runs, and 14-21 minutes twice when a connection was throttled.
 
 ## Notes
 

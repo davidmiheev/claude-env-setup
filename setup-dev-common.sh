@@ -598,11 +598,7 @@ stage_profilers() {
     p="$(ls -d /usr/lib/linux-tools/*/perf 2>/dev/null | sort -V | tail -1 || true)"
     if [ -n "$p" ]; then $SUDO ln -sf "$p" /usr/local/bin/perf; else warn "no perf binary found"; fi
   fi
-  ensure_uv
-  local t
-  for t in py-spy scalene memray; do
-    uv tool install --quiet "$t" || warn "could not install $t"
-  done
+  echo "note: py-spy, scalene and memray are installed by the pytools stage."
   echo "note: perf/samply/py-spy need perf_event access or ptrace; containers often restrict both."
 }
 
@@ -636,18 +632,23 @@ stage_mcp() {
   mcp_summary
 }
 
+# uv tool installs spend their time on per-request latency through the proxy (ipython and
+# pip-audit pull dozens of small packages), not on bandwidth, so they run 4 at a time:
+# 53-79 s for the lot instead of 125-180 s one after another.
 stage_pytools() {
   ensure_uv
-  local t installed
+  local t installed todo=() tools="$PY_TOOLS"
   installed="$(uv tool list 2>/dev/null || true)"
-  for t in $PY_TOOLS; do
+  if ! skip profilers; then tools="$tools py-spy scalene memray"; fi   # the profilers' python tools ride along
+  for t in $tools; do
     if grep -q "^$t " <<<"$installed"; then continue; fi
-    log "uv tool: $t"
-    uv tool install --quiet "$t" || warn "could not install $t"
+    todo+=("$t")
   done
+  if [ "${#todo[@]}" -gt 0 ]; then
+    printf '%s\n' "${todo[@]}" | xargs -P 4 -I{} sh -c 'uv tool install --quiet {} >/dev/null 2>&1 && echo "installed {}" || echo "WARNING: could not install {}" >&2'
+  fi
   uv tool list 2>/dev/null | grep -E '^[a-z]' || true
 }
-
 stage_tex() {
   $SUDO fc-cache -f >/dev/null 2>&1 || true
 
