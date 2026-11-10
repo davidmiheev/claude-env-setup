@@ -657,7 +657,7 @@ stage_verify() {
   d="$(mktemp -d)"
   for n in safety ml rl; do
     if [ -x "$(vpy "$n")" ]; then
-      ( set +e; "verify_$n" >"$d/$n.log" 2>&1; echo $? >"$d/$n.rc" ) &
+      ( set +e; cd "$d"; "verify_$n" >"$d/$n.log" 2>&1; echo $? >"$d/$n.rc" ) &   # cd: MuJoCo writes MUJOCO_LOG.TXT to the cwd
     fi
   done
   wait
