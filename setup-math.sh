@@ -370,10 +370,9 @@ stage_apt() {
   if ! skip cas; then pk+=("${APT_CAS[@]}"); fi
   if ! skip tex; then pk+=("${APT_TEX[@]}"); fi
   if ! skip typst; then pk+=(fonts-dejavu fontconfig); fi
-  # Regina's repo is signed with a key from debian-keyring. When that is already there (it is in
-  # the cloud image), the repo goes in before the one `apt-get update` and regina-normal rides
-  # along; otherwise the regina stage installs the keyring and Regina after this one.
-  if regina_wanted && [ -f /usr/share/keyrings/debian-keyring.gpg ] && regina_add_source; then
+  # Regina's repo goes in before the one `apt-get update`, so regina-normal rides along; if its
+  # source or key cannot be set up, the regina stage installs it the long way after this one.
+  if regina_wanted && regina_add_source; then
     pk+=(regina-normal)
   fi
   apt_install_soft "${pk[@]}"
@@ -427,16 +426,30 @@ regina_wanted() {
   case "$WITH_REGINA" in 0) return 1 ;; 1) return 0 ;; esac
   grep -rqi regina "$MTENGINE_DIR/src" 2>/dev/null    # auto: only if this mtengine has the backend
 }
+# The repo's .sources file names debian-keyring.gpg (a 31 MB package) and pins one key in it by
+# fingerprint. Without debian-keyring, that one key is fetched from keyserver.ubuntu.com into its own
+# keyring and the file points there, so Regina needs no second apt round; the fingerprint pin stays.
+REGINA_KEY=519A0009FB50255DDB4E889270A6BEDF542D38D9
 regina_add_source() { # put the repo's .sources file in place; the next apt_update reads it
-  local codename f tmp
+  local codename f tmp kr=/usr/share/keyrings/debian-keyring.gpg
   codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"
   case "$codename" in noble|plucky|questing) ;; *) echo "Regina's apt repo has no build for '$codename'" >&2; return 1 ;; esac
   f="/etc/apt/sources.list.d/regina-$codename.sources"
   if [ -f "$f" ]; then return 0; fi
-  tmp="$(mktemp)"
-  curl -fsSL -o "$tmp" "https://regina-normal.github.io/repos/regina-$codename.sources" || { rm -f "$tmp"; return 1; }
-  $SUDO install -m 644 "$tmp" "$f"
-  rm -f "$tmp"
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/src" "https://regina-normal.github.io/repos/regina-$codename.sources" || { rm -rf "$tmp"; return 1; }
+  if [ ! -f "$kr" ]; then
+    kr=/usr/share/keyrings/regina-archive-keyring.gpg
+    if ! { curl -fsSL -o "$tmp/key.asc" "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x$REGINA_KEY" \
+           && gpg --show-keys --with-colons "$tmp/key.asc" 2>/dev/null | grep -q "^fpr:*$REGINA_KEY:" \
+           && gpg --dearmor <"$tmp/key.asc" >"$tmp/key.gpg"; }; then
+      rm -rf "$tmp"; return 1
+    fi
+    $SUDO install -m 644 "$tmp/key.gpg" "$kr"
+    sed -i "s|/usr/share/keyrings/debian-keyring.gpg|$kr|" "$tmp/src"
+  fi
+  $SUDO install -m 644 "$tmp/src" "$f"
+  rm -rf "$tmp"
   APT_UPDATED=0
 }
 
@@ -448,6 +461,7 @@ stage_regina() {
   fi
   if ! command -v regina-python >/dev/null 2>&1; then   # the apt stage installs it when it can
     apt_install debian-keyring curl ca-certificates
+    $SUDO rm -f /etc/apt/sources.list.d/regina-*.sources  # rewritten below against debian-keyring
     regina_add_source
     apt_install regina-normal
   fi

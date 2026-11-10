@@ -624,27 +624,23 @@ stage_mcp() {
   mcp_summary
 }
 
-stage_verify() {
-  local rc=0
-  if [ -x "$(vpy safety)" ]; then
-    log "verify: safety"
-    "$(vpy safety)" -I -c '
+# The three checks are independent (mostly imports, CPU-bound): stage_verify runs them in parallel.
+verify_safety() {
+  "$(vpy safety)" -I -c '
 import torch, transformer_lens, sae_lens, nnsight, circuitsvis, inspect_ai, einops, jaxtyping
 print("torch", torch.__version__, "cuda", torch.cuda.is_available(), "| transformer_lens", transformer_lens.__version__ if hasattr(transformer_lens, "__version__") else "ok", "| sae_lens", sae_lens.__version__)
-' || rc=1
-  fi
-  if [ -x "$(vpy ml)" ]; then
-    log "verify: ml"
-    "$(vpy ml)" -I -c '
+'
+}
+verify_ml() {
+  "$(vpy ml)" -I -c '
 import torch, torchvision, jax, flax, optax, sklearn, xgboost, lightgbm, polars, statsmodels, arch, cvxpy, optuna, numba, hftbacktest, torch_geometric
 import jax.numpy as jnp
 print("torch", torch.__version__, "| jax", jax.__version__, jax.devices(), "| hftbacktest", hftbacktest.__version__ if hasattr(hftbacktest, "__version__") else "ok")
 print("jit:", float(jax.jit(lambda x: (x * x).sum())(jnp.arange(4.0))), "| numba:", numba.njit(lambda a: a + 1)(1))
-' || rc=1
-  fi
-  if [ -x "$(vpy rl)" ]; then
-    log "verify: rl"
-    MUJOCO_GL="${MUJOCO_GL:-osmesa}" "$(vpy rl)" -I -c '
+'
+}
+verify_rl() {
+  MUJOCO_GL="${MUJOCO_GL:-osmesa}" "$(vpy rl)" -I -c '
 import gymnasium as gym, ale_py, numpy as np
 gym.register_envs(ale_py)
 for name in ["CartPole-v1", "LunarLander-v3", "HalfCheetah-v5", "ALE/Pong-v5"]:
@@ -654,8 +650,24 @@ PPO("MlpPolicy", "CartPole-v1", n_steps=64, batch_size=32, device="cpu", verbose
 print("SB3 PPO ok")
 import gymnax, brax, pgx, rlax, flashbax, trl, peft, hftbacktest, numba
 print("jax RL libs, TRL, hftbacktest ok")
-' || rc=1
-  fi
+'
+}
+stage_verify() {
+  local rc=0 d n
+  d="$(mktemp -d)"
+  for n in safety ml rl; do
+    if [ -x "$(vpy "$n")" ]; then
+      ( set +e; "verify_$n" >"$d/$n.log" 2>&1; echo $? >"$d/$n.rc" ) &
+    fi
+  done
+  wait
+  for n in safety ml rl; do
+    [ -f "$d/$n.rc" ] || continue
+    log "verify: $n"
+    cat "$d/$n.log"
+    [ "$(cat "$d/$n.rc")" = 0 ] || rc=1
+  done
+  rm -rf "$d"
   return "$rc"
 }
 
@@ -693,17 +705,19 @@ join() {
 print_times() { echo; echo "stage times (wall $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"; }
 # <<< parallel-stages
 
-# lanes: [ds-agent -> mcp]  |  [base + python -> safety, ml, rl, equivariant -> typst]  -> verify
+# lanes: [ds-agent -> mcp]  |  [python -> safety, ml, rl -> typst]  |  [base -> equivariant]  -> verify
 ensure_uv || warn "uv could not be installed; uv-based stages will fail"   # once, before the lanes race for it
 spawn base; spawn python; spawn ds-agent
-join base python                # the venv builds need the system libs and uv's Python
-spawn safety; spawn ml; spawn rl; spawn equivariant
+join python                     # the venvs need uv's Python; all their packages are wheels, so not base
+spawn safety; spawn ml; spawn rl
 join ds-agent
 spawn mcp
 join safety
 spawn typst                      # runs over the safety venv's typst package
+join base
+spawn equivariant                # opt-in; builds lie-learn/py3nj from source with base's compilers
 join ml rl equivariant typst mcp
-spawn verify
+spawn verify                     # MuJoCo/OSMesa from base, every venv
 join verify
 print_times
 
