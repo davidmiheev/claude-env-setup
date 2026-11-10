@@ -541,9 +541,12 @@ RL_PKGS=(torch numpy "gymnasium[classic-control,box2d,mujoco,other]>=1.0" "stabl
   jupyterlab ipykernel pytest ruff)
 
 stage_base() {
-  apt_install build-essential pkg-config cmake git curl ca-certificates unzip jq ripgrep \
-    python3 python3-venv python3-pip gfortran swig libgl1 libegl1 libosmesa6 libglfw3 ffmpeg libgomp1 \
-    nodejs npm
+  local pk=(build-essential pkg-config cmake git curl ca-certificates unzip jq ripgrep
+    python3 python3-venv python3-pip gfortran swig libgl1 libegl1 libosmesa6 libglfw3 ffmpeg libgomp1)
+  # npx is for the kaggle MCP server (mcp-remote). The cloud image ships Node in /opt/node22;
+  # Ubuntu's npm would add ~340 node-* packages, which is most of this stage's dpkg time.
+  if ! command -v npx >/dev/null 2>&1; then pk+=(nodejs npm); fi
+  apt_install "${pk[@]}"
 }
 
 stage_python() {

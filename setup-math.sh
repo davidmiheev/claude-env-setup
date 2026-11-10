@@ -370,6 +370,12 @@ stage_apt() {
   if ! skip cas; then pk+=("${APT_CAS[@]}"); fi
   if ! skip tex; then pk+=("${APT_TEX[@]}"); fi
   if ! skip typst; then pk+=(fonts-dejavu fontconfig); fi
+  # Regina's repo is signed with a key from debian-keyring. When that is already there (it is in
+  # the cloud image), the repo goes in before the one `apt-get update` and regina-normal rides
+  # along; otherwise the regina stage installs the keyring and Regina after this one.
+  if regina_wanted && [ -f /usr/share/keyrings/debian-keyring.gpg ] && regina_add_source; then
+    pk+=(regina-normal)
+  fi
   apt_install_soft "${pk[@]}"
 }
 
@@ -414,27 +420,39 @@ stage_lean() {
   echo "      (matroid_toric/formal does; run 'lake exe cache get' there for the prebuilt Mathlib)."
 }
 
-stage_regina() {
-  case "$WITH_REGINA" in
-    0) echo "WITH_REGINA=0: not installing Regina"; return 0 ;;
-    auto) if ! grep -rqi regina "$MTENGINE_DIR/src" 2>/dev/null; then
-            echo "this mtengine checkout has no Regina backend; skipping (set MTENGINE_REF=claude/add-regina-backend or WITH_REGINA=1)"
-            return 0
-          fi ;;
-  esac
-  # Steps follow https://regina-normal.github.io/install/ubuntu.html (same as regina_experiments)
-  local codename
+# Regina from its official apt repo; steps follow https://regina-normal.github.io/install/ubuntu.html
+# (same as regina_experiments).
+regina_wanted() {
+  if skip regina; then return 1; fi
+  case "$WITH_REGINA" in 0) return 1 ;; 1) return 0 ;; esac
+  grep -rqi regina "$MTENGINE_DIR/src" 2>/dev/null    # auto: only if this mtengine has the backend
+}
+regina_add_source() { # put the repo's .sources file in place; the next apt_update reads it
+  local codename f tmp
   codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"
   case "$codename" in noble|plucky|questing) ;; *) echo "Regina's apt repo has no build for '$codename'" >&2; return 1 ;; esac
-  if command -v regina-python >/dev/null 2>&1; then echo "Regina already installed"; return 0; fi
-  apt_install debian-keyring curl ca-certificates
-  local tmp; tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/regina-$codename.sources" "https://regina-normal.github.io/repos/regina-$codename.sources"
-  $SUDO cp "$tmp/regina-$codename.sources" /etc/apt/sources.list.d/
-  rm -rf "$tmp"
+  f="/etc/apt/sources.list.d/regina-$codename.sources"
+  if [ -f "$f" ]; then return 0; fi
+  tmp="$(mktemp)"
+  curl -fsSL -o "$tmp" "https://regina-normal.github.io/repos/regina-$codename.sources" || { rm -f "$tmp"; return 1; }
+  $SUDO install -m 644 "$tmp" "$f"
+  rm -f "$tmp"
   APT_UPDATED=0
-  apt_install regina-normal
-  t="$(mktemp --suffix=.py)"; echo 'import regina; print("Regina", regina.versionString())' > "$t"; regina-python -q "$t"; rm -f "$t"
+}
+
+stage_regina() {
+  if ! regina_wanted; then
+    if [ "$WITH_REGINA" = 0 ]; then echo "WITH_REGINA=0: not installing Regina"
+    else echo "this mtengine checkout has no Regina backend; skipping (set MTENGINE_REF=claude/add-regina-backend or WITH_REGINA=1)"; fi
+    return 0
+  fi
+  if ! command -v regina-python >/dev/null 2>&1; then   # the apt stage installs it when it can
+    apt_install debian-keyring curl ca-certificates
+    regina_add_source
+    apt_install regina-normal
+  fi
+  local t; t="$(mktemp --suffix=.py)"
+  echo 'import regina; print("Regina", regina.versionString())' > "$t"; regina-python -q "$t"; rm -f "$t"
 }
 
 stage_mtengine() {
@@ -592,15 +610,16 @@ join() {
 print_times() { echo; echo "stage times (wall $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"; }
 # <<< parallel-stages
 
-# lanes: [apt -> cas, tex, typst, regina]  |  [fetch -> mtengine -> mcp]  |  [lean]  -> verify
+# lanes: fetch -> [apt -> cas, tex, typst, regina]  |  [mtengine -> mcp]  |  [lean]  -> verify
 ensure_uv || warn "uv could not be installed; mtengine falls back to pip"
-spawn apt; spawn fetch; spawn lean
-join fetch
+spawn fetch; spawn lean
+join fetch                # a second or two; the apt stage reads the checkout to decide on Regina
+spawn apt
 spawn mtengine            # its venv needs neither apt nor the backends
-join apt
-spawn cas; spawn tex; spawn typst; spawn regina   # regina adds its own apt source: after the apt lane
 join mtengine
 spawn mcp
+join apt
+spawn cas; spawn tex; spawn typst; spawn regina   # regina only checks, unless apt could not add it
 join lean cas regina mcp typst tex
 spawn verify              # `mte versions` needs every backend and the venv
 join verify
