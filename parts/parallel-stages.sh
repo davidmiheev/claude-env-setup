@@ -1,4 +1,4 @@
-# >>> parallel-stages (shared by setup-dev-common.sh and setup-research.sh) -----------
+# >>> parallel-stages (shared by the setup-*.sh scripts) ------------------------------
 # spawn NAME runs stage_<name> in a background subshell (output to $LOGDIR/NAME.log);
 # join NAME... waits, prints each stage's log with its duration, and records it in TIMES.
 T0="${T0:-$SECONDS}"

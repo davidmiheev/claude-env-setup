@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # setup-math.sh: "math" environment for Claude Code sessions (Ubuntu 24.04).
 #
+#   apt        one apt-get for the base, cas and tex packages below
 #   fetch      clone github.com/davidmiheev/mtengine (or fast-forward an existing checkout)
 #   cas        Macaulay2, gfan, polymake, Singular, nauty   (the backends mtengine calls)
 #   lean       elan (Lean toolchain manager; toolchains come from the Lake project)
 #   regina     Regina from its official apt repo, only if this mtengine has a Regina backend
-#   mtengine   venv + `pip install -e ".[test]"`, `mte`/`mtengine-mcp` on PATH, verification
+#   mtengine   venv + `uv pip install -e ".[test]"`, `mte`/`mtengine-mcp` on PATH
 #   mcp        registers the `mtengine` MCP server with Claude Code (user scope) and checks that it
 #              answers tools/list
 #   typst      Typst (Python package) + `typst-compile`, what ai-safety-ladder uses for its PDF write-ups
 #   tex        pandoc + XeLaTeX + latexmk + fonts for matroid_toric's thesis/paper
 #              (TeX Gyre Pagella, eulervm, newpxmath, bbold) and atcoder-style notes (DejaVu,
 #              TeX Gyre Termes Math), plus what regina_experiments' writeup build needs
+#   verify     `mte versions` (every backend but Lean present), a tiny `mte call`, RUN_TESTS
 #
 # What mtengine needs (read from its pyproject.toml and src/): Python >= 3.11, the `mcp` package
 # (+ pytest for the tests), and the executables M2, gfan, polymake, Singular, dreadnaut and
@@ -20,8 +22,15 @@
 # Idempotent: safe to re-run. Run as root (environment setup) or as a user with sudo.
 # Exits non-zero if any stage failed, after trying all the others.
 #
+# Speed: a cloud environment's setup script is snapshotted only if it finishes within ~5 minutes
+# (otherwise it reruns for every session), so independent stages run in parallel lanes:
+#   apt (base + cas + tex in one apt-get)  |  fetch -> mtengine venv -> mcp  |  lean
+#   ... then cas / tex / typst / regina, and last verify (needs the backends and the venv).
+#
 # Knobs (environment variables):
-#   SKIP="lean regina"                stages to skip (space or comma separated)
+#   SKIP="lean regina"                stages to skip (space or comma separated): apt fetch cas lean
+#                                     regina mtengine mcp typst tex verify. Skipping cas/tex also
+#                                     drops their apt packages.
 #   MTENGINE_DIR=$HOME/mtengine       MTENGINE_REPO=https://github.com/davidmiheev/mtengine.git
 #   MTENGINE_REF=claude/add-regina-backend   branch to check out (default: the default branch)
 #   WITH_REGINA=auto|1|0              auto = install Regina iff the checked-out source mentions it
@@ -30,6 +39,7 @@
 #                                     (also passed to the registered MCP server when set)
 set -euo pipefail
 
+ENV_NAME=math-env                     # persist_env writes /etc/profile.d/$ENV_NAME.sh
 MTENGINE_REPO="${MTENGINE_REPO:-https://github.com/davidmiheev/mtengine.git}"
 MTENGINE_DIR="${MTENGINE_DIR:-$HOME/mtengine}"
 MTENGINE_REF="${MTENGINE_REF:-}"
@@ -40,6 +50,7 @@ SKIP="${SKIP:-}"
 export PATH="$HOME/.local/bin:$HOME/.elan/bin:$PATH"
 
 # ------------------------------------------------------------------ helpers ----
+# >>> common-helpers (shared by the setup-*.sh scripts) ----------------------------
 log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 skip() { case ",${SKIP//[ ]/,}," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -49,8 +60,12 @@ if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 APT_UPDATED=0
 apt_update() {
   if [ "$APT_UPDATED" = 1 ]; then return 0; fi
-  $SUDO apt-get update -qq || { sleep 3; $SUDO apt-get update -qq; }
-  APT_UPDATED=1
+  local _
+  for _ in 1 2 3 4 5; do   # another lane may hold the lists lock
+    $SUDO apt-get update -qq && { APT_UPDATED=1; return 0; }
+    sleep 5
+  done
+  return 1
 }
 # Installs the listed packages that are missing and exist in the index; names that do not
 # exist are reported and skipped instead of aborting the whole install.
@@ -65,9 +80,16 @@ apt_install() {
   if [ "${#miss[@]}" -gt 0 ]; then warn "not available in apt, skipped: ${miss[*]}"; fi
   if [ "${#ok[@]}" -eq 0 ]; then return 0; fi
   # a stale index gives 404s on moved .debs: refresh once and retry
-  DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq --no-install-recommends "${ok[@]}" >/dev/null \
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends "${ok[@]}" >/dev/null \
     || { APT_UPDATED=0; apt_update
-         DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq --fix-missing --no-install-recommends "${ok[@]}" >/dev/null; }
+         DEBIAN_FRONTEND=noninteractive $SUDO apt-get -o DPkg::Lock::Timeout=600 install -y -qq --fix-missing --no-install-recommends "${ok[@]}" >/dev/null; }
+}
+# Like apt_install, but a failing package does not fail the stage.
+apt_install_soft() {
+  local p
+  if apt_install "$@"; then return 0; fi
+  warn "bulk install failed, retrying one package at a time"
+  for p in "$@"; do apt_install "$p" || warn "could not install $p"; done
 }
 
 append_once() { # append_once FILE LINE
@@ -76,9 +98,29 @@ append_once() { # append_once FILE LINE
 }
 persist_env() { # persist_env 'export FOO=bar'  (single-quote it so $HOME expands later)
   append_once "$HOME/.bashrc" "$1"
-  if [ "$(id -u)" -eq 0 ]; then append_once /etc/profile.d/math-env.sh "$1"; fi
+  if [ "$(id -u)" -eq 0 ]; then append_once "/etc/profile.d/${ENV_NAME:-dev-common}.sh" "$1"; fi
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then append_once "$CLAUDE_ENV_FILE" "$1"; fi
 }
+
+ensure_uv() {
+  if command -v uv >/dev/null 2>&1; then return 0; fi
+  log "installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh \
+    || python3 -m pip install --quiet --break-system-packages uv
+  persist_env 'export PATH="$HOME/.local/bin:$PATH"'
+  command -v uv >/dev/null 2>&1
+}
+
+git_sync() { # git_sync URL DIR  (clone, or fast-forward an existing checkout)
+  if [ -d "$2/.git" ]; then
+    git -C "$2" pull --ff-only --quiet || warn "could not fast-forward $2 (local changes?); using it as is"
+  else
+    mkdir -p "$(dirname "$2")"
+    GIT_LFS_SKIP_SMUDGE=1 git clone --quiet "$1" "$2"
+  fi
+}
+# <<< common-helpers
+
 link_bin() { # link_bin TARGET NAME: make a command available on PATH
   local dir
   if [ "$(id -u)" -eq 0 ]; then dir=/usr/local/bin; else dir="$HOME/.local/bin"; mkdir -p "$dir"; fi
@@ -313,11 +355,31 @@ TYPEOF
 # <<< typst-writeups
 
 # ------------------------------------------------------------------- stages ----
-stage_base() {
-  apt_install git curl ca-certificates python3 python3-venv python3-pip build-essential
+# One apt-get call for everything the stages below need from apt (the index is refreshed once and
+# dpkg unpacks once); the stages themselves then only configure and verify.
+APT_BASE=(git curl ca-certificates python3 python3-venv python3-pip build-essential)
+# Package names as in mtengine's Dockerfile; they provide M2, gfan, polymake, Singular, dreadnaut.
+APT_CAS=(macaulay2 gfan polymake singular nauty)
+# texlive-fonts-extra carries eulervm / newpxmath / bbold (the thesis preamble); it is large.
+APT_TEX=(pandoc latexmk texlive-xetex texlive-latex-recommended texlive-latex-extra
+  texlive-fonts-recommended texlive-fonts-extra texlive-pictures texlive-plain-generic texlive-science
+  lmodern fontconfig poppler-utils fonts-dejavu fonts-texgyre fonts-texgyre-math fonts-inter
+  fonts-liberation2 python3-matplotlib)   # last one: regina_experiments' install-writeup-deps.sh
+stage_apt() {
+  local pk=("${APT_BASE[@]}")
+  if ! skip cas; then pk+=("${APT_CAS[@]}"); fi
+  if ! skip tex; then pk+=("${APT_TEX[@]}"); fi
+  if ! skip typst; then pk+=(fonts-dejavu fontconfig); fi
+  # Regina's repo goes in before the one `apt-get update`, so regina-normal rides along; if its
+  # source or key cannot be set up, the regina stage installs it the long way after this one.
+  if regina_wanted && regina_add_source; then
+    pk+=(regina-normal)
+  fi
+  apt_install_soft "${pk[@]}"
 }
 
 stage_fetch() {
+  command -v git >/dev/null 2>&1 || apt_install git ca-certificates   # runs alongside the apt lane
   log "mtengine -> $MTENGINE_DIR${MTENGINE_REF:+ ($MTENGINE_REF)}"
   if [ -d "$MTENGINE_DIR/.git" ]; then
     if [ -n "$MTENGINE_REF" ]; then
@@ -337,12 +399,12 @@ stage_fetch() {
 }
 
 stage_cas() {
-  # Package names as in mtengine's Dockerfile; they provide M2, gfan, polymake, Singular, dreadnaut.
-  apt_install macaulay2 gfan polymake singular nauty
+  apt_install "${APT_CAS[@]}"   # a no-op after the apt stage, unless that one was skipped or failed
   local b
   for b in M2 gfan polymake Singular dreadnaut; do
     command -v "$b" >/dev/null 2>&1 || { echo "missing executable after install: $b" >&2; return 1; }
   done
+  echo "M2, gfan, polymake, Singular, dreadnaut: present"
 }
 
 stage_lean() {
@@ -357,40 +419,79 @@ stage_lean() {
   echo "      (matroid_toric/formal does; run 'lake exe cache get' there for the prebuilt Mathlib)."
 }
 
-stage_regina() {
-  case "$WITH_REGINA" in
-    0) echo "WITH_REGINA=0: not installing Regina"; return 0 ;;
-    auto) if ! grep -rqi regina "$MTENGINE_DIR/src" 2>/dev/null; then
-            echo "this mtengine checkout has no Regina backend; skipping (set MTENGINE_REF=claude/add-regina-backend or WITH_REGINA=1)"
-            return 0
-          fi ;;
-  esac
-  # Steps follow https://regina-normal.github.io/install/ubuntu.html (same as regina_experiments)
-  local codename
+# Regina from its official apt repo; steps follow https://regina-normal.github.io/install/ubuntu.html
+# (same as regina_experiments).
+regina_wanted() {
+  if skip regina; then return 1; fi
+  case "$WITH_REGINA" in 0) return 1 ;; 1) return 0 ;; esac
+  grep -rqi regina "$MTENGINE_DIR/src" 2>/dev/null    # auto: only if this mtengine has the backend
+}
+# The repo's .sources file names debian-keyring.gpg (a 31 MB package) and pins one key in it by
+# fingerprint. Without debian-keyring, that one key is fetched from keyserver.ubuntu.com into its own
+# keyring and the file points there, so Regina needs no second apt round; the fingerprint pin stays.
+REGINA_KEY=519A0009FB50255DDB4E889270A6BEDF542D38D9
+regina_add_source() { # put the repo's .sources file in place; the next apt_update reads it
+  local codename f tmp kr=/usr/share/keyrings/debian-keyring.gpg
   codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"
   case "$codename" in noble|plucky|questing) ;; *) echo "Regina's apt repo has no build for '$codename'" >&2; return 1 ;; esac
-  if command -v regina-python >/dev/null 2>&1; then echo "Regina already installed"; return 0; fi
-  apt_install debian-keyring curl ca-certificates
-  local tmp; tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/regina-$codename.sources" "https://regina-normal.github.io/repos/regina-$codename.sources"
-  $SUDO cp "$tmp/regina-$codename.sources" /etc/apt/sources.list.d/
+  f="/etc/apt/sources.list.d/regina-$codename.sources"
+  if [ -f "$f" ]; then return 0; fi
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/src" "https://regina-normal.github.io/repos/regina-$codename.sources" || { rm -rf "$tmp"; return 1; }
+  if [ ! -f "$kr" ]; then
+    kr=/usr/share/keyrings/regina-archive-keyring.gpg
+    if ! { curl -fsSL -o "$tmp/key.asc" "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x$REGINA_KEY" \
+           && gpg --show-keys --with-colons "$tmp/key.asc" 2>/dev/null | grep -q "^fpr:*$REGINA_KEY:" \
+           && gpg --dearmor <"$tmp/key.asc" >"$tmp/key.gpg"; }; then
+      rm -rf "$tmp"; return 1
+    fi
+    $SUDO install -m 644 "$tmp/key.gpg" "$kr"
+    sed -i "s|/usr/share/keyrings/debian-keyring.gpg|$kr|" "$tmp/src"
+  fi
+  $SUDO install -m 644 "$tmp/src" "$f"
   rm -rf "$tmp"
   APT_UPDATED=0
-  apt_install regina-normal
-  regina-python -c 'import regina; print("Regina", regina.versionString())'
+}
+
+stage_regina() {
+  if ! regina_wanted; then
+    if [ "$WITH_REGINA" = 0 ]; then echo "WITH_REGINA=0: not installing Regina"
+    else echo "this mtengine checkout has no Regina backend; skipping (set MTENGINE_REF=claude/add-regina-backend or WITH_REGINA=1)"; fi
+    return 0
+  fi
+  if ! command -v regina-python >/dev/null 2>&1; then   # the apt stage installs it when it can
+    apt_install debian-keyring curl ca-certificates
+    $SUDO rm -f /etc/apt/sources.list.d/regina-*.sources  # rewritten below against debian-keyring
+    regina_add_source
+    apt_install regina-normal
+  fi
+  local t; t="$(mktemp --suffix=.py)"
+  echo 'import regina; print("Regina", regina.versionString())' > "$t"; regina-python -q "$t"; rm -f "$t"
 }
 
 stage_mtengine() {
   python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
     || { echo "mtengine needs Python >= 3.11, found $(python3 --version)" >&2; return 1; }
   cd "$MTENGINE_DIR"
-  [ -x .venv/bin/python ] || python3 -m venv .venv
-  .venv/bin/pip install -q --upgrade pip
-  .venv/bin/pip install -q -e ".[test]"
+  # uv when present: from a cold cache it installs this in ~1.5 min, pip in ~3.7 min. `uv venv`
+  # also does not need python3-venv, which the apt lane may still be installing.
+  if command -v uv >/dev/null 2>&1; then
+    [ -x .venv/bin/python ] || uv venv -q --seed --python "$(command -v python3)" .venv
+    uv pip install --python .venv/bin/python -q -e ".[test]"
+  else
+    [ -x .venv/bin/python ] || python3 -m venv .venv
+    .venv/bin/pip install -q --upgrade pip
+    .venv/bin/pip install -q -e ".[test]"
+  fi
   link_bin "$MTENGINE_DIR/.venv/bin/mte" mte
   link_bin "$MTENGINE_DIR/.venv/bin/mtengine-mcp" mtengine-mcp
   persist_env "export MTENGINE_DIR=\"$MTENGINE_DIR\""
+  echo "mtengine installed. MCP server: $MTENGINE_DIR/.venv/bin/mtengine-mcp (also on PATH as mtengine-mcp)"
+}
 
+stage_verify() {
+  cd "$MTENGINE_DIR"
+  [ -x .venv/bin/mte ] || { echo "$MTENGINE_DIR/.venv/bin/mte not found (run the mtengine stage first)" >&2; return 1; }
   log "mte versions"
   .venv/bin/mte versions | tee /tmp/mte-versions.json
   # Every backend except Lean (which needs a Lake project) must be present.
@@ -398,7 +499,7 @@ stage_mtengine() {
     echo "a mtengine backend is missing (see above)" >&2; return 1
   fi
   .venv/bin/mte call hessenberg_betti '{"kbar": [2, 2], "h": [2, 2]}' >/dev/null   # Gr(2,4): no external tool
-  echo "mtengine OK. MCP server: $MTENGINE_DIR/.venv/bin/mtengine-mcp (also on PATH as mtengine-mcp)"
+  echo "mtengine OK"
   if [ "$RUN_TESTS" = 1 ]; then
     log "pytest (Lean tests excluded)"
     .venv/bin/pytest -q -k "not lean" --deselect tests/test_backends.py::test_versions_present
@@ -406,11 +507,7 @@ stage_mtengine() {
 }
 
 stage_tex() {
-  # texlive-fonts-extra carries eulervm / newpxmath / bbold (the thesis preamble); it is large.
-  apt_install pandoc latexmk texlive-xetex texlive-latex-recommended texlive-latex-extra \
-    texlive-fonts-recommended texlive-fonts-extra texlive-pictures texlive-plain-generic texlive-science \
-    lmodern fontconfig poppler-utils fonts-dejavu fonts-texgyre fonts-texgyre-math fonts-inter \
-    fonts-liberation2 python3-matplotlib   # last one: regina_experiments' install-writeup-deps.sh
+  apt_install "${APT_TEX[@]}"   # a no-op after the apt stage, unless that one was skipped or failed
   $SUDO fc-cache -f >/dev/null 2>&1 || true
 
   local f fonts
@@ -494,27 +591,54 @@ stage_mcp() {
 }
 
 # ------------------------------------------------------------------- driver ----
+# >>> parallel-stages (shared by the setup-*.sh scripts) ------------------------------
+# spawn NAME runs stage_<name> in a background subshell (output to $LOGDIR/NAME.log);
+# join NAME... waits, prints each stage's log with its duration, and records it in TIMES.
+T0="${T0:-$SECONDS}"
 FAILED=()
 TIMES=()
-T0=$SECONDS
-run_stage() { # run_stage NAME  -> runs stage_<name> in a subshell with `set -e` really on
-  local name="$1" rc
-  if skip "$name"; then log "skipping $name"; return 0; fi
-  log "stage: $name"
-  local t=$SECONDS
-  set +e
-  ( set -euo pipefail; "stage_${name//-/_}" )
-  rc=$?
-  set -e
-  TIMES+=("$(printf '%-12s %4ss%s' "$name" "$((SECONDS - t))" "$([ "$rc" -ne 0 ] && echo '  FAILED')")")
-  if [ "$rc" -ne 0 ]; then warn "stage '$name' failed (exit $rc)"; FAILED+=("$name"); fi
+LOGDIR="$(mktemp -d)"
+declare -A PID STARTED
+spawn() {
+  local name="$1"
+  if skip "$name"; then echo "[+$((SECONDS - T0))s] skipping $name"; return 0; fi
+  echo "[+$((SECONDS - T0))s] start $name"
+  STARTED[$name]=$SECONDS
+  ( set +e; s0=$SECONDS; ( set -euo pipefail; "stage_${name//-/_}" ) >"$LOGDIR/$name.log" 2>&1; echo $? >"$LOGDIR/$name.rc"; echo $((SECONDS - s0)) >"$LOGDIR/$name.secs" ) &
+  PID[$name]=$!
 }
+join() {
+  local name rc secs
+  for name in "$@"; do
+    [ -n "${PID[$name]:-}" ] || continue
+    wait "${PID[$name]}" || true
+    rc="$(cat "$LOGDIR/$name.rc" 2>/dev/null || echo 1)"
+    secs="$(cat "$LOGDIR/$name.secs" 2>/dev/null || echo $((SECONDS - STARTED[$name])))"
+    log "stage: $name (${secs}s, $([ "$rc" = 0 ] && echo ok || echo "FAILED, exit $rc"))"
+    cat "$LOGDIR/$name.log"
+    TIMES+=("$(printf '%-12s %4ss  (started +%ss)%s' "$name" "$secs" "$((STARTED[$name] - T0))" "$([ "$rc" -ne 0 ] && echo '  FAILED')")")
+    if [ "$rc" -ne 0 ]; then warn "stage '$name' failed (exit $rc)"; FAILED+=("$name"); fi
+    unset "PID[$name]"
+  done
+}
+print_times() { echo; echo "stage times (wall $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"; }
+# <<< parallel-stages
 
-run_stage base
-for s in fetch cas lean regina mtengine mcp typst tex; do run_stage "$s"; done
+# lanes: fetch -> [apt -> cas, tex, typst, regina]  |  [mtengine -> mcp]  |  [lean]  -> verify
+ensure_uv || warn "uv could not be installed; mtengine falls back to pip"
+spawn fetch; spawn lean
+join fetch                # a second or two; the apt stage reads the checkout to decide on Regina
+spawn apt
+spawn mtengine            # its venv needs neither apt nor the backends
+join mtengine
+spawn mcp
+join apt
+spawn cas; spawn tex; spawn typst; spawn regina   # regina only checks, unless apt could not add it
+join lean cas regina mcp typst tex
+spawn verify              # `mte versions` needs every backend and the venv
+join verify
 
-echo
-echo "stage times (total $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"
+print_times
 if [ "${#FAILED[@]}" -gt 0 ]; then
   echo "math setup finished with failures: ${FAILED[*]}" >&2
   exit 1
