@@ -5,7 +5,7 @@
 #   fetch      clone github.com/davidmiheev/mtengine (or fast-forward an existing checkout)
 #   cas        Macaulay2, gfan, polymake, Singular, nauty, Normaliz   (the backends mtengine calls)
 #   lean       elan (Lean toolchain manager; toolchains come from the Lake project)
-#   mathlib    `mte lean-init`: mtengine's standard Lean project with the prebuilt Mathlib (~5 GB)
+#   mathlib    `mte lean-init`: mtengine's standard Lean project with the prebuilt Mathlib (~10 GB)
 #   regina     Regina from its official apt repo, only if this mtengine has a Regina backend
 #   mtengine   venv + `uv pip install -e ".[test]"`, `mte`/`mtengine-mcp` on PATH
 #   mcp        registers the `mtengine` MCP server with Claude Code (user scope) and checks that it
@@ -408,6 +408,10 @@ stage_cas() {
     command -v "$b" >/dev/null 2>&1 || { echo "missing executable after install: $b" >&2; return 1; }
   done
   echo "M2, gfan, polymake, Singular, dreadnaut, normaliz: present"
+  # normaliz is there for Macaulay2's Polyhedra and the packages built on it: check that it loads (~2 s)
+  M2 --script <(printf 'needsPackage "Polyhedra";\n') >/dev/null 2>&1 \
+    || { echo "Macaulay2 cannot load Polyhedra (normaliz missing or broken?)" >&2; return 1; }
+  echo "Macaulay2 loads Polyhedra"
 }
 
 stage_lean() {
