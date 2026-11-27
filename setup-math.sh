@@ -3,8 +3,9 @@
 #
 #   apt        one apt-get for the base, cas and tex packages below
 #   fetch      clone github.com/davidmiheev/mtengine (or fast-forward an existing checkout)
-#   cas        Macaulay2, gfan, polymake, Singular, nauty   (the backends mtengine calls)
+#   cas        Macaulay2, gfan, polymake, Singular, nauty, Normaliz   (the backends mtengine calls)
 #   lean       elan (Lean toolchain manager; toolchains come from the Lake project)
+#   mathlib    `mte lean-init`: mtengine's standard Lean project with the prebuilt Mathlib (~10 GB)
 #   regina     Regina from its official apt repo, only if this mtengine has a Regina backend
 #   mtengine   venv + `uv pip install -e ".[test]"`, `mte`/`mtengine-mcp` on PATH
 #   mcp        registers the `mtengine` MCP server with Claude Code (user scope) and checks that it
@@ -16,20 +17,20 @@
 #   verify     `mte versions` (every backend but Lean present), a tiny `mte call`, RUN_TESTS
 #
 # What mtengine needs (read from its pyproject.toml and src/): Python >= 3.11, the `mcp` package
-# (+ pytest for the tests), and the executables M2, gfan, polymake, Singular, dreadnaut and
-# lean/lake. Regina is a backend only in the unmerged PR #1 (branch claude/add-regina-backend).
+# (+ pytest for the tests), and the executables M2, gfan, polymake, Singular, dreadnaut, normaliz,
+# regina-python and lean/lake.
 #
 # Idempotent: safe to re-run. Run as root (environment setup) or as a user with sudo.
 # Exits non-zero if any stage failed, after trying all the others.
 #
 # Speed: a cloud environment's setup script is snapshotted only if it finishes within ~5 minutes
 # (otherwise it reruns for every session), so independent stages run in parallel lanes:
-#   apt (base + cas + tex in one apt-get)  |  fetch -> mtengine venv -> mcp  |  lean
+#   apt (base + cas + tex in one apt-get)  |  fetch -> mtengine venv -> mcp  |  lean -> mathlib
 #   ... then cas / tex / typst / regina, and last verify (needs the backends and the venv).
 #
 # Knobs (environment variables):
 #   SKIP="lean regina"                stages to skip (space or comma separated): apt fetch cas lean
-#                                     regina mtengine mcp typst tex verify. Skipping cas/tex also
+#                                     mathlib regina mtengine mcp typst tex verify. Skipping cas/tex also
 #                                     drops their apt packages.
 #   MTENGINE_DIR=$HOME/mtengine       MTENGINE_REPO=https://github.com/davidmiheev/mtengine.git
 #   MTENGINE_REF=claude/add-regina-backend   branch to check out (default: the default branch)
@@ -358,8 +359,10 @@ TYPEOF
 # One apt-get call for everything the stages below need from apt (the index is refreshed once and
 # dpkg unpacks once); the stages themselves then only configure and verify.
 APT_BASE=(git curl ca-certificates python3 python3-venv python3-pip build-essential)
-# Package names as in mtengine's Dockerfile; they provide M2, gfan, polymake, Singular, dreadnaut.
-APT_CAS=(macaulay2 gfan polymake singular nauty)
+# Package names as in mtengine's Dockerfile; they provide M2, gfan, polymake, Singular, dreadnaut
+# and normaliz (without it Macaulay2's Polyhedra, Matroids, NormalToricVarieties, GKMVarieties and
+# Tropical packages do not load).
+APT_CAS=(macaulay2 gfan polymake singular nauty normaliz)
 # texlive-fonts-extra carries eulervm / newpxmath / bbold (the thesis preamble); it is large.
 APT_TEX=(pandoc latexmk texlive-xetex texlive-latex-recommended texlive-latex-extra
   texlive-fonts-recommended texlive-fonts-extra texlive-pictures texlive-plain-generic texlive-science
@@ -401,10 +404,14 @@ stage_fetch() {
 stage_cas() {
   apt_install "${APT_CAS[@]}"   # a no-op after the apt stage, unless that one was skipped or failed
   local b
-  for b in M2 gfan polymake Singular dreadnaut; do
+  for b in M2 gfan polymake Singular dreadnaut normaliz; do
     command -v "$b" >/dev/null 2>&1 || { echo "missing executable after install: $b" >&2; return 1; }
   done
-  echo "M2, gfan, polymake, Singular, dreadnaut: present"
+  echo "M2, gfan, polymake, Singular, dreadnaut, normaliz: present"
+  # normaliz is there for Macaulay2's Polyhedra and the packages built on it: check that it loads (~2 s)
+  M2 --script <(printf 'needsPackage "Polyhedra";\n') >/dev/null 2>&1 \
+    || { echo "Macaulay2 cannot load Polyhedra (normaliz missing or broken?)" >&2; return 1; }
+  echo "Macaulay2 loads Polyhedra"
 }
 
 stage_lean() {
@@ -415,8 +422,18 @@ stage_lean() {
   fi
   persist_env 'export PATH="$HOME/.elan/bin:$PATH"'
   elan --version
-  echo "note: mtengine's Lean backend needs a Lake project with Mathlib; set MTENGINE_LEAN_PROJECT"
-  echo "      (matroid_toric/formal does; run 'lake exe cache get' there for the prebuilt Mathlib)."
+  echo "note: mtengine's Lean backend uses its standard Lake project (the mathlib stage), or"
+  echo "      MTENGINE_LEAN_PROJECT if that names a Lake project; 'mte lean-status' says which."
+}
+
+# mtengine's standard Lean project (Lean and Mathlib pinned in mtengine) with the prebuilt Mathlib,
+# in ~/.local/share/mtengine/lean (~10 GB with the toolchain, ~2 min). Needs elan and the venv.
+# A failure only warns: Lean is optional, and a failing stage would stop sessions from starting.
+stage_mathlib() {
+  cd "$MTENGINE_DIR"
+  if ! .venv/bin/mte lean-init; then
+    warn "mte lean-init failed: Lean is unavailable until it is rerun (the other backends are fine)"
+  fi
 }
 
 # Regina from its official apt repo; steps follow https://regina-normal.github.io/install/ubuntu.html
@@ -456,7 +473,7 @@ regina_add_source() { # put the repo's .sources file in place; the next apt_upda
 stage_regina() {
   if ! regina_wanted; then
     if [ "$WITH_REGINA" = 0 ]; then echo "WITH_REGINA=0: not installing Regina"
-    else echo "this mtengine checkout has no Regina backend; skipping (set MTENGINE_REF=claude/add-regina-backend or WITH_REGINA=1)"; fi
+    else echo "this mtengine checkout has no Regina backend; skipping (set WITH_REGINA=1 to install it anyway)"; fi
     return 0
   fi
   if ! command -v regina-python >/dev/null 2>&1; then   # the apt stage installs it when it can
@@ -624,17 +641,22 @@ join() {
 print_times() { echo; echo "stage times (wall $((SECONDS - T0))s):"; printf '  %s\n' "${TIMES[@]}"; }
 # <<< parallel-stages
 
-# lanes: fetch -> [apt -> cas, tex, typst, regina]  |  [mtengine -> mcp]  |  [lean]  -> verify
+# lanes: fetch -> [apt -> cas, tex, typst, regina]  |  [mtengine -> mcp]  |  [lean] -> mathlib  -> verify
 ensure_uv || warn "uv could not be installed; mtengine falls back to pip"
 spawn fetch; spawn lean
 join fetch                # a second or two; the apt stage reads the checkout to decide on Regina
+# Backend packages from mtengine's Dockerfile (its `ARG APT_BACKENDS="..."` line), if it names them.
+pk="$(sed -n 's/^ARG APT_BACKENDS="\(.*\)"$/\1/p' "$MTENGINE_DIR/Dockerfile" 2>/dev/null | head -n 1 || true)"
+if [ -n "$pk" ]; then read -ra APT_CAS <<<"$pk"; fi
 spawn apt
 spawn mtengine            # its venv needs neither apt nor the backends
 join mtengine
 spawn mcp
+join lean
+spawn mathlib             # mte lean-init: needs the venv (mtengine) and elan (lean)
 join apt
 spawn cas; spawn tex; spawn typst; spawn regina   # regina only checks, unless apt could not add it
-join lean cas regina mcp typst tex
+join cas regina mcp typst tex mathlib
 spawn verify              # `mte versions` needs every backend and the venv
 join verify
 

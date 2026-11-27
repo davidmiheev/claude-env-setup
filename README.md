@@ -7,7 +7,7 @@ starts, so the MCP servers it registers are present from the first message.
 | script | environment | what it sets up |
 |---|---|---|
 | `setup-dev-common.sh` | dev-common | apt base + profilers + TeX, Rust toolchain, prebuilt cargo tools (conda-forge), Python tools (uv), ds-agent + its MCP servers |
-| `setup-math.sh` | math | CAS tools, Lean, Regina, mtengine (+ its MCP server), TeX, Typst writeup tooling (parallel lanes) |
+| `setup-math.sh` | math | CAS tools (+ Normaliz), Lean + mtengine's Mathlib project, Regina, mtengine (+ its MCP server), TeX, Typst writeup tooling (parallel lanes) |
 | `setup-research.sh` | research | uv + venvs for AI safety / ML / RL / quant, ds-agent MCP servers, Typst writeup tooling |
 
 Every script has a header listing its knobs (`SKIP="stage ..."`, `MCP_SERVERS`, ...), prints a
@@ -20,7 +20,7 @@ purged and apt's cache emptied, empty uv cache and home directory, 4 cores):
 
 | script | wall time | critical path |
 |---|---|---|
-| `setup-math.sh` | 105-222 s (was 286 s run stage by stage) | the one apt-get: 87-212 s, 629 MB of it `texlive-fonts-extra` |
+| `setup-math.sh` | 131 s with the Lean project (105-222 s before it; 286 s run stage by stage) | `mte lean-init`: ~10 GB of Lean toolchain + prebuilt Mathlib in 126 s, alongside the one apt-get (87-212 s, 629 MB of it `texlive-fonts-extra`) |
 | `setup-research.sh` | 201 s (was 278 s) | the venv downloads, ~1.5 GB of wheels shared by three venvs |
 | `setup-dev-common.sh` | 111 s (2 cores, earlier measurement) | prebuilt cargo tools ~26 s; Python tools installed 4 at a time |
 
